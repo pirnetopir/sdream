@@ -21,38 +21,32 @@ const MODEL_OWNER = "bytedance";
 const MODEL_NAME = "seedream-4";
 const MODEL_BASE = `https://api.replicate.com/v1/models/${MODEL_OWNER}/${MODEL_NAME}`;
 
-/** Helper: call Replicate with proper token header (Token, nie Bearer) */
 async function rfetch(url, options = {}) {
   const headers = {
-    "Authorization": `Token ${REPLICATE_TOKEN}`,
+    "Authorization": `Token ${REPLICATE_TOKEN}`, // dôležité: "Token", nie "Bearer"
     ...(options.headers || {})
   };
   return fetch(url, { ...options, headers });
 }
-
-/** Helper: read response safely for better error messages */
 async function readResp(resp) {
   const text = await resp.text();
   try { return { raw: text, json: JSON.parse(text) }; }
   catch { return { raw: text, json: null }; }
 }
 
-/** Vytvorí 1 predikciu (jediný obrázok) – official endpoint s fallbackom na version */
 async function createSinglePrediction({ prompt, aspect }) {
   const input = {
     prompt,
-    // aspect ratio aliasy (niektoré buildy používajú `aspect`, iné `aspect_ratio`)
     ...(aspect ? { aspect_ratio: aspect, aspect } : {})
   };
 
-  // 1) official-model endpoint (bez version)
+  // 1) official-model endpoint
   {
     const resp = await rfetch(`${MODEL_BASE}/predictions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input })
     });
-
     if (resp.ok) return await resp.json();
 
     if (![404, 405, 400].includes(resp.status)) {
@@ -61,7 +55,7 @@ async function createSinglePrediction({ prompt, aspect }) {
     }
   }
 
-  // 2) fallback: /v1/predictions s latest_version.id
+  // 2) fallback: version flow
   const infoResp = await rfetch(`${MODEL_BASE}`);
   if (!infoResp.ok) {
     const body = await readResp(infoResp);
@@ -83,12 +77,10 @@ async function createSinglePrediction({ prompt, aspect }) {
   return body2.json ?? JSON.parse(body2.raw);
 }
 
-/** Healthcheck + debug token presence (neposiela token, len či je nastavený) */
 app.get("/health", (_, res) => {
   res.json({ ok: true, hasToken: Boolean(REPLICATE_TOKEN) });
 });
 
-/** Spustí generovanie: ak numImages>1 → vytvorí viac samostatných predikcií paralelne */
 app.post("/api/generate", async (req, res) => {
   const startedAt = Date.now();
   try {
@@ -113,11 +105,9 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
-    // N > 1 → vytvor paralelne N predikcií (každá 1 obrázok)
     const jobs = Array.from({ length: n }, () =>
       createSinglePrediction({ prompt, aspect })
     );
-
     const results = await Promise.all(jobs);
 
     return res.json({
@@ -137,7 +127,6 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-/** Proxy na polling jednej predikcie */
 app.get("/api/predictions/:id", async (req, res) => {
   const id = req.params.id;
   try {
@@ -155,7 +144,6 @@ app.get("/api/predictions/:id", async (req, res) => {
   }
 });
 
-/** SPA fallback */
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
