@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Seedream 4 • Replicate Starter</title>
+  <title>Seedream 4 • Replicate Test</title>
   <style>
-    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:0; background:#0b0c10; color:#e6e9ee}
-    header{padding:18px 20px; background:#12151a; position:sticky; top:0; border-bottom:1px solid #1c212b}
-    main{max-width:900px; margin:24px auto; padding:0 16px}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0c10;color:#e6e9ee}
+    header{padding:18px 20px;background:#12151a;position:sticky;top:0;border-bottom:1px solid #1c212b}
+    main{max-width:900px;margin:24px auto;padding:0 16px}
     .card{background:#11151b;border:1px solid #1a202b;border-radius:16px;padding:16px 16px 8px}
-    .row{display:flex; gap:12px; align-items:stretch}
-    textarea{width:100%; min-height:100px; resize:vertical; border-radius:12px; border:1px solid #2a3343; background:#0e1218; color:#fff; padding:12px; font-size:16px}
+    .row{display:flex;gap:12px;align-items:stretch}
+    textarea{width:100%;min-height:100px;resize:vertical;border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:12px;font-size:16px}
     button{background:#00bcff;border:none;border-radius:12px;padding:12px 16px;color:#001018;font-weight:700;cursor:pointer}
-    button[disabled]{opacity:.55; cursor:not-allowed}
-    .muted{color:#94a3b8; font-size:13px}
-    .out{margin-top:18px; display:grid; gap:12px}
-    .imgwrap{background:#0d1117;border:1px solid #1c232e;border-radius:14px; padding:10px; display:inline-block}
-    img{max-width:100%; height:auto; border-radius:10px; display:block}
-    .status{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; color:#aab6c1}
+    button[disabled]{opacity:.55;cursor:not-allowed}
+    .muted{color:#94a3b8;font-size:13px}
+    .out{margin-top:18px;display:grid;gap:12px}
+    .imgwrap{background:#0d1117;border:1px solid #1c232e;border-radius:14px;padding:10px;display:inline-block}
+    img{max-width:100%;height:auto;border-radius:10px;display:block}
+    .status{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#aab6c1}
     a{color:#00bcff}
   </style>
 </head>
@@ -25,7 +25,7 @@
   <header><strong>Seedream 4</strong> • Replicate test</header>
   <main>
     <div class="card">
-      <p>Zadaj prompt a overíme, že API generuje obrázok (Replicate + Seedream 4).</p>
+      <p>Zadaj prompt a overíme generovanie obrázka (Replicate + Seedream 4).</p>
       <div class="row">
         <textarea id="prompt" placeholder="Napr.: Cinematic portrait of a vintage car by Bratislava castle, golden hour"></textarea>
       </div>
@@ -33,7 +33,7 @@
         <button id="btn">Generovať</button>
         <div class="status" id="status"></div>
       </div>
-      <p class="muted">Pozn.: Token ostáva na serveri. Frontend volá len vlastný backend.</p>
+      <p class="muted">Token zostáva na serveri. Frontend volá len vlastný backend.</p>
     </div>
 
     <div class="out" id="out"></div>
@@ -51,7 +51,7 @@
         const data = await r.json();
         if (!r.ok){ throw new Error(data?.error || "Request failed"); }
         statusEl.textContent = `status: ${data.status}`;
-        if (data.status === "succeeded" || data.status === "failed" || data.status === "canceled"){
+        if (["succeeded","failed","canceled"].includes(data.status)){
           return data;
         }
         await sleep(1800);
@@ -76,10 +76,10 @@
         const data = await r.json();
         if (!r.ok){ throw new Error(data?.error || "API error"); }
 
-        statusEl.innerHTML = `prediction id: <code>${data.id}</code> — <a href="${data.webUrl}" target="_blank">open on Replicate</a>`;
+        statusEl.innerHTML = `prediction id: <code>${data.id}</code> — ${data.webUrl ? `<a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
         const final = await poll(data.id);
 
-        // Seedream 4 returns array of URLs for images.
+        // Replicate output is usually an array of image URLs.
         const outputs = Array.isArray(final.output) ? final.output : (final.output?.images || []);
         if (outputs?.length){
           outputs.forEach(url=>{
@@ -91,7 +91,7 @@
             out.appendChild(wrap);
           });
         }else{
-          out.innerHTML = "<div class='muted'>Žiadny výstup sa nenašiel (pozri logy v odkaze vyššie).</div>";
+          out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
         }
       }catch(err){
         console.error(err);
