@@ -1,6 +1,8 @@
 import express from "express";
 import fetch from "node-fetch";
 import path from "path";
+import fs from "fs";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 dotenv.config();
@@ -9,8 +11,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" })); // kvôli dataURL uploadu
 app.use(express.static(path.join(__dirname, "public")));
+
+// statické servovanie uploadov
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+app.use("/uploads", express.static(UPLOAD_DIR, {
+  setHeaders(res){ res.setHeader("Cache-Control","public, max-age=31536000, immutable"); }
+}));
 
 const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60_000);
@@ -30,7 +39,7 @@ function abortableFetch(url, options = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const headers = {
-    "Authorization": `Token ${REPLICATE_TOKEN}`, // Dôležité: "Token", nie "Bearer"
+    "Authorization": `Token ${REPLICATE_TOKEN}`, // dôležité: "Token"
     ...(options.headers || {})
   };
   return fetch(url, { ...options, headers, signal: controller.signal })
@@ -63,7 +72,6 @@ async function fetchRetry(url, options = {}, label = "request") {
       if (resp.ok) return resp;
 
       const { raw } = await readResp(resp);
-      // retry?
       if (shouldRetry(resp.status)) {
         const waitMs = Math.min(1000 * Math.pow(2, attempt), 8000);
         console.warn(`[${label}] Retry ${attempt + 1}/${MAX_RETRIES} after ${resp.status}: ${raw.slice(0, 200)}`);
@@ -71,7 +79,6 @@ async function fetchRetry(url, options = {}, label = "request") {
         attempt++;
         continue;
       }
-      // non-retryable
       throw new Error(`[${label}] ${resp.status} ${raw}`);
     } catch (err) {
       lastErr = err;
@@ -89,14 +96,55 @@ async function fetchRetry(url, options = {}, label = "request") {
   throw lastErr || new Error(`[${label}] failed after retries`);
 }
 
+/** --- DataURL -> uloženie súboru a návrat absolútnej URL --- */
+function parseDataUrl(dataUrl){
+  // data:<mime>;base64,<data>
+  const m = /^data:(.+);base64,(.*)$/i.exec(dataUrl || "");
+  if (!m) throw new Error("Invalid data URL");
+  const mime = m[1];
+  const data = Buffer.from(m[2], "base64");
+  let ext = ".bin";
+  if (mime === "image/png") ext = ".png";
+  else if (mime === "image/jpeg") ext = ".jpg";
+  else if (mime === "image/webp") ext = ".webp";
+  else if (mime === "image/gif") ext = ".gif";
+  return { mime, data, ext };
+}
+
+function publicBaseUrl(req){
+  // Render poskytuje verejnú URL => poskladáme plnú cestu k /uploads/...
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+/** --- Upload endpoint (dataURL) --- */
+app.post("/api/upload", async (req, res) => {
+  try {
+    const { dataUrl } = req.body || {};
+    if (!dataUrl) return res.status(400).json({ error: "Missing 'dataUrl'." });
+    const { data, ext } = parseDataUrl(dataUrl);
+    const name = crypto.randomBytes(8).toString("hex") + ext;
+    const filePath = path.join(UPLOAD_DIR, name);
+    fs.writeFileSync(filePath, data);
+    const url = `${publicBaseUrl(req)}/uploads/${name}`;
+    return res.json({ url });
+  } catch (err) {
+    console.error("[/api/upload] ERROR:", err?.message || err);
+    return res.status(400).json({ error: String(err?.message || err) });
+  }
+});
+
 /** --- Core: Create one prediction (1 obrázok) --- */
-async function createSinglePrediction({ prompt, aspect }) {
+async function createSinglePrediction({ prompt, aspect, imageUrl }) {
   const input = {
     prompt,
-    ...(aspect ? { aspect_ratio: aspect, aspect } : {})
+    ...(aspect ? { aspect_ratio: aspect, aspect } : {}),
+    // image-to-image aliasy: model si vyberie vlastný
+    ...(imageUrl ? { image: imageUrl, image_url: imageUrl, input_image: imageUrl, reference_image: imageUrl } : {})
   };
 
-  // 1) Skús "official" endpoint a požiadaj o sync odpoveď
+  // 1) official endpoint (Prefer: wait)
   {
     const resp = await fetchRetry(
       `${MODEL_BASE}/predictions`,
@@ -104,30 +152,23 @@ async function createSinglePrediction({ prompt, aspect }) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Prefer": "wait" // ak model dovolí, čakáme na hotový výstup
+          "Prefer": "wait"
         },
         body: JSON.stringify({ input })
       },
       "official-predict"
     );
-
     const body = await readResp(resp);
-    // ak máme JSON s id/output, vrátime
-    try {
-      return body.json ?? JSON.parse(body.raw);
-    } catch {
-      // padneme do fallbacku
-    }
+    try { return body.json ?? JSON.parse(body.raw || "{}"); }
+    catch {}
   }
 
-  // 2) Fallback: zistiť latest_version.id a použiť /v1/predictions (tiež skúsime sync)
+  // 2) fallback: version flow
   const infoResp = await fetchRetry(`${MODEL_BASE}`, {}, "model-info");
   const infoBody = await readResp(infoResp);
   const infoJson = infoBody.json || JSON.parse(infoBody.raw || "{}");
   const versionId = infoJson?.latest_version?.id;
-  if (!versionId) {
-    throw new Error(`[model-info] latest_version.id not found`);
-  }
+  if (!versionId) throw new Error(`[model-info] latest_version.id not found`);
 
   const resp2 = await fetchRetry(
     "https://api.replicate.com/v1/predictions",
@@ -150,11 +191,11 @@ app.get("/health", (_, res) => {
   res.json({ ok: true, hasToken: Boolean(REPLICATE_TOKEN), timeoutMs: REQUEST_TIMEOUT_MS, maxRetries: MAX_RETRIES });
 });
 
-/** --- Start generation --- */
+/** --- Start generation (batch podporený) --- */
 app.post("/api/generate", async (req, res) => {
   const startedAt = Date.now();
   try {
-    const { prompt, numImages, aspect } = req.body || {};
+    const { prompt, numImages, aspect, imageUrl } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "Missing 'prompt'." });
     }
@@ -165,8 +206,7 @@ app.post("/api/generate", async (req, res) => {
     const n = Math.max(1, Math.min(4, Number(numImages) || 1));
 
     if (n === 1) {
-      const data = await createSinglePrediction({ prompt, aspect });
-      // ak máme výstup už teraz (Prefer: wait), pošleme ho hneď
+      const data = await createSinglePrediction({ prompt, aspect, imageUrl });
       const outputs =
         Array.isArray(data?.output) ? data.output :
         Array.isArray(data?.output?.images) ? data.output.images :
@@ -182,11 +222,9 @@ app.post("/api/generate", async (req, res) => {
       });
     }
 
-    // batch – N paralelných predikcií (každá 1 obrázok)
-    const jobs = Array.from({ length: n }, () => createSinglePrediction({ prompt, aspect }));
+    const jobs = Array.from({ length: n }, () => createSinglePrediction({ prompt, aspect, imageUrl }));
     const results = await Promise.all(jobs);
 
-    // pripravíme zoznam id + hneď aj output (ak ho máme)
     const items = results.map(r => {
       const outputs =
         Array.isArray(r?.output) ? r.output :
@@ -209,13 +247,11 @@ app.post("/api/generate", async (req, res) => {
     });
   } catch (err) {
     console.error("[/api/generate] ERROR:", err?.message || err);
-    return res.status(502).json({ // 502, aby si to videl aj v UI ako gateway-type issue
-      error: err?.message || String(err)
-    });
+    return res.status(502).json({ error: err?.message || String(err) });
   }
 });
 
-/** --- Poll one prediction (ak sme nedostali output hneď) --- */
+/** --- Poll one prediction --- */
 app.get("/api/predictions/:id", async (req, res) => {
   const id = req.params.id;
   try {
