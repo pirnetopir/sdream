@@ -1,36 +1,26 @@
 # Seedream 4 + Replicate • Render starter
 
-Minimalistický projekt (Node/Express + malé HTML UI), ktorý volá **Seedream 4** z **Replicate API**.
+Minimal projekt (Node/Express + malé HTML UI), ktorý volá **Seedream 4** z **Replicate API**.
 
-## Rýchly štart lokálne
-1. `cp .env.example .env` a do `.env` vlož `REPLICATE_API_TOKEN` (nájdeš na replicate.com).
+## Lokálne
+1. `cp .env.example .env` a vlož `REPLICATE_API_TOKEN`.
 2. `npm install`
-3. `npm start` a otvor `http://localhost:3000`
+3. `npm start` → `http://localhost:3000`
 
-## Deploy na Render.com
-1. Nahraj projekt na GitHub (napr. súkromný repo).  
-2. Na **Render.com** → **New +** → **Web Service** → **Connect repository** (vyber tento repo).
-3. Nastav:
-   - **Build Command**: `npm install`
-   - **Start Command**: `npm start`
-   - **Environment**: Node
-4. V **Environment** premenných na Render pridaj:
-   - `REPLICATE_API_TOKEN` (hodnotu nekopíruj do kódu, iba do Render secret).
-5. Deploy. Po nabehnutí otvor URL služby (Render vygeneruje doménu).
+## Render.com
+1. Pushni repo na GitHub.
+2. Render → **New Web Service** → Connect repo.
+3. Build: `npm install`, Start: `npm start`, Environment: Node.
+4. V **Environment Variables** pridaj `REPLICATE_API_TOKEN` (secret).
+5. Deploy a otvor URL služby.
 
-> Pozn.: Server si sám pri štarte zistí **najnovší `version_id`** modelu `bytedance/seedream-4` a použije ho pri `POST /v1/predictions` (viď kód v `server.js`).
+## Ako to volá API
+- Primárne: `POST /v1/models/bytedance/seedream-4/predictions` (bez `version`).
+- Fallback: `GET /v1/models/...` → `latest_version.id` → `POST /v1/predictions` s `version`.
 
-## API Endpoints tejto appky
-- `POST /api/generate` — vytvorí prediction a vráti `{ id, getUrl, webUrl, status }`
-- `GET /api/predictions/:id` — proxy na Replicate `GET /v1/predictions/{id}`
+## Endpoints
+- `POST /api/generate` → vytvorí prediction, vráti `{ id, getUrl, webUrl, status }`
+- `GET /api/predictions/:id` → polling stavu a výstupov
 
 ## Bezpečnosť
-- Token ostáva na serveri. Frontend nikdy nepošle token do prehliadača.
-- Render: nastav `REPLICATE_API_TOKEN` ako **secret env var**.
-
-## Kde upravovať
-- Frontend: `public/index.html`
-- Backend: `server.js`
-
-## Licencia
-MIT
+- Token je iba na serveri (NEposielaj do frontendu).
