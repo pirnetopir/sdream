@@ -16,63 +16,77 @@ const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 if (!REPLICATE_TOKEN) {
   console.warn("[WARN] Missing REPLICATE_API_TOKEN env var.");
 }
+
 const MODEL_OWNER = "bytedance";
 const MODEL_NAME = "seedream-4";
-const MODEL_VERSIONS_URL = `https://api.replicate.com/v1/models/${MODEL_OWNER}/${MODEL_NAME}/versions`;
+const MODEL_BASE = `https://api.replicate.com/v1/models/${MODEL_OWNER}/${MODEL_NAME}`;
 
-let LATEST_VERSION_ID = null;
-
-async function fetchLatestVersion() {
-  const resp = await fetch(MODEL_VERSIONS_URL, {
-    headers: { "Authorization": `Bearer ${REPLICATE_TOKEN}` }
-  });
-  if (!resp.ok) {
-    const msg = await resp.text();
-    throw new Error(`Failed to get model versions: ${resp.status} ${msg}`);
-  }
-  const data = await resp.json();
-  // Replicate returns { results: [ { id, created_at, ... }, ... ] }
-  const first = data?.results?.[0];
-  if (!first?.id) throw new Error("No versions returned for the model.");
-  LATEST_VERSION_ID = first.id;
-  console.log("[Replicate] Latest version id:", LATEST_VERSION_ID);
-  return LATEST_VERSION_ID;
+/** Helper: call Replicate with Bearer token */
+async function rfetch(url, options = {}) {
+  const headers = {
+    "Authorization": `Bearer ${REPLICATE_TOKEN}`,
+    ...(options.headers || {})
+  };
+  return fetch(url, { ...options, headers });
 }
 
-// health
+/** Try official-model endpoint first. If not supported, fall back to versioned predictions */
+async function createPrediction({ prompt }) {
+  // 1) Attempt official-model predictions (no version needed)
+  {
+    const resp = await rfetch(`${MODEL_BASE}/predictions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { prompt } })
+    });
+
+    // If OK → return immediately
+    if (resp.ok) return resp.json();
+
+    // If NOT FOUND or method not allowed → fall back
+    if (resp.status === 404 || resp.status === 405 || resp.status === 400) {
+      // Try fallback only for these
+    } else {
+      // Other errors → throw with response text
+      const tx = await resp.text();
+      throw new Error(`Official predictions failed: ${resp.status} ${tx}`);
+    }
+  }
+
+  // 2) Fallback: fetch latest_version.id
+  const info = await (await rfetch(`${MODEL_BASE}`)).json();
+  const versionId = info?.latest_version?.id;
+  if (!versionId) {
+    throw new Error("Model response missing latest_version.id (fallback failed).");
+  }
+
+  const resp2 = await rfetch("https://api.replicate.com/v1/predictions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      version: versionId,
+      input: { prompt }
+    })
+  });
+
+  const data2 = await resp2.json();
+  if (!resp2.ok) {
+    throw new Error(`Fallback predictions failed: ${resp2.status} ${JSON.stringify(data2)}`);
+  }
+  return data2;
+}
+
+/** Healthcheck */
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-// create prediction (async mode)
+/** Start prediction */
 app.post("/api/generate", async (req, res) => {
   try {
     const { prompt } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "Missing 'prompt'." });
     }
-    if (!LATEST_VERSION_ID) {
-      await fetchLatestVersion();
-    }
-
-    const resp = await fetch("https://api.replicate.com/v1/predictions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${REPLICATE_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        version: LATEST_VERSION_ID,
-        input: {
-          // Seedream 4 supports 'prompt'; we keep simple here.
-          prompt
-        }
-      })
-    });
-
-    const data = await resp.json();
-    if (!resp.ok) {
-      return res.status(resp.status).json({ error: data?.error || data });
-    }
-    // Return the prediction id and urls.get for client-side polling
+    const data = await createPrediction({ prompt });
     return res.json({
       id: data.id,
       getUrl: data?.urls?.get,
@@ -80,38 +94,31 @@ app.post("/api/generate", async (req, res) => {
       status: data.status
     });
   } catch (err) {
-    console.error(err);
+    console.error("[/api/generate]", err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// proxy to get prediction status (and outputs)
+/** Poll prediction status (proxy) */
 app.get("/api/predictions/:id", async (req, res) => {
   const id = req.params.id;
   try {
     const url = `https://api.replicate.com/v1/predictions/${id}`;
-    const resp = await fetch(url, {
-      headers: { "Authorization": `Bearer ${REPLICATE_TOKEN}` }
-    });
+    const resp = await rfetch(url);
     const data = await resp.json();
     return res.status(resp.status).json(data);
   } catch (err) {
-    console.error(err);
+    console.error("[/api/predictions/:id]", err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// fallback to index.html
+/** SPA fallback */
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  try {
-    await fetchLatestVersion();
-  } catch (e) {
-    console.warn("[Startup] Could not prefetch model version:", e.message);
-  }
-  console.log(`Server listening on port ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`Server listening on :${PORT}`);
 });
