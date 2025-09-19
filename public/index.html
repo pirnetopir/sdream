@@ -11,7 +11,7 @@
     .card{background:#11151b;border:1px solid #1a202b;border-radius:16px;padding:16px 16px 8px}
     .row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap}
     textarea{flex:1 1 100%;min-height:100px;resize:vertical;border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:12px;font-size:16px}
-    select{border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:10px 12px;font-size:15px}
+    select,input[type="file"]{border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:10px 12px;font-size:15px}
     .controls{display:flex;gap:12px;flex-wrap:wrap}
     .controls > *{min-width:200px}
     button{background:#00bcff;border:none;border-radius:12px;padding:12px 16px;color:#001018;font-weight:700;cursor:pointer}
@@ -24,6 +24,7 @@
     a{color:#00bcff}
     label{font-size:13px;color:#aab6c1;margin-bottom:6px;display:block}
     .field{display:flex;flex-direction:column}
+    .thumb{max-width:160px;border-radius:10px;border:1px solid #1c232e}
     .error{color:#ff6b6b}
     code{background:#0e141b;padding:2px 6px;border-radius:6px}
   </style>
@@ -32,7 +33,8 @@
   <header><strong>Seedream 4</strong> • Replicate test</header>
   <main>
     <div class="card">
-      <p>Zadaj prompt, počet obrázkov (max 4) a formát (pomery strán).</p>
+      <p>Zadaj prompt, prípadne pridaj referenčný obrázok (image-to-image), počet obrázkov (max 4) a formát.</p>
+
       <div class="row">
         <textarea id="prompt" placeholder="Napr.: Cinematic portrait of a vintage car by Bratislava castle, golden hour"></textarea>
       </div>
@@ -63,13 +65,19 @@
             <option value="16:9">16:9 (wide)</option>
           </select>
         </div>
+
+        <div class="field">
+          <label for="image">Referenčný obrázok (voliteľné)</label>
+          <input type="file" id="image" accept="image/*">
+          <div id="preview"></div>
+        </div>
       </div>
 
       <div class="row" style="margin-top:10px">
         <button id="btn">Generovať</button>
         <div class="status" id="status"></div>
       </div>
-      <p class="muted">Pozn.: Niektoré buildy môžu ignorovať počet výstupov; server to rieši paralelnými predikciami. Token je iba na serveri.</p>
+      <p class="muted">Pozn.: Obrázok sa uloží do <code>/uploads</code> na serveri a použije sa ako URL pre image-to-image. Token zostáva na serveri.</p>
     </div>
 
     <div class="out" id="out"></div>
@@ -80,11 +88,43 @@
     const sleep = (ms)=>new Promise(r=>setTimeout(r, ms));
     const statusEl = $("#status");
     const out = $("#out");
+    const fileInput = $("#image");
+    const preview = $("#preview");
+    let selectedDataUrl = null;
 
     function safeMsg(x){
       if (x == null) return "Unknown error";
       if (typeof x === "string") return x;
       try { return JSON.stringify(x); } catch { return String(x); }
+    }
+
+    // náhľad a načítanie do dataURL
+    fileInput.addEventListener("change", ()=>{
+      selectedDataUrl = null;
+      preview.innerHTML = "";
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        selectedDataUrl = reader.result;
+        const img = document.createElement("img");
+        img.src = selectedDataUrl;
+        img.className = "thumb";
+        preview.appendChild(img);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    async function uploadIfAny(){
+      if (!selectedDataUrl) return null;
+      const r = await fetch("/api/upload", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ dataUrl: selectedDataUrl })
+      });
+      const data = await r.json().catch(()=> ({}));
+      if (!r.ok) throw new Error(`Upload failed (${r.status}): ${safeMsg(data?.error || data)}`);
+      return data.url;
     }
 
     async function pollOne(id){
@@ -102,7 +142,6 @@
     }
 
     function extractOutputs(final){
-      // Možné tvary výstupu
       if (typeof final?.output === "string") return [final.output];
       if (Array.isArray(final?.output)) return final.output;
       if (Array.isArray(final?.output?.images)) return final.output.images;
@@ -119,57 +158,70 @@
       const aspect = $("#aspect").value || undefined;
 
       const btn = $("#btn");
-      btn.disabled = true; btn.textContent = "Beží...";
+      btn.disabled = true; btn.textContent = "Nahrávam obrázok...";
 
       try{
+        const imageUrl = await uploadIfAny(); // null ak nevybraný
+
+        btn.textContent = "Generujem...";
         const r = await fetch("/api/generate", {
           method: "POST",
           headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({ prompt, numImages, aspect })
+          body: JSON.stringify({ prompt, numImages, aspect, imageUrl })
         });
 
         const data = await r.json().catch(()=> ({}));
         if (!r.ok){
-          // robustná hláška (žiadne [object Object])
           const msg = safeMsg(data?.error || data);
           statusEl.innerHTML = `<span class="error">Request failed (${r.status}): ${msg}</span>`;
           throw new Error(msg);
         }
 
+        // ak sme output dostali už priamo (Prefer: wait)
+        function renderOutputs(urls){
+          urls.forEach(url=>{
+            const wrap = document.createElement("div");
+            wrap.className = "imgwrap";
+            const img = document.createElement("img");
+            img.src = url;
+            wrap.appendChild(img);
+            out.appendChild(wrap);
+          });
+        }
+
         if (data.mode === "single") {
+          if (Array.isArray(data.output) && data.output.length){
+            statusEl.textContent = "hotovo (sync)";
+            renderOutputs(data.output);
+            return;
+          }
           statusEl.innerHTML = `prediction id: <code>${data.id ?? "?"}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
           if (!data.id){ throw new Error("Server nevrátil prediction id."); }
           const final = await pollOne(data.id);
           const outputs = extractOutputs(final);
-          if (outputs.length){
-            outputs.forEach(url=>{
-              const wrap = document.createElement("div");
-              wrap.className = "imgwrap";
-              const img = document.createElement("img");
-              img.src = url;
-              wrap.appendChild(img);
-              out.appendChild(wrap);
-            });
-          } else {
-            out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
-          }
+          if (outputs.length) renderOutputs(outputs);
+          else out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
         } else if (data.mode === "batch") {
-          statusEl.textContent = `batch: ${data.count} predikcií – čakám na výsledky...`;
+          // ak máme hneď outputy
+          let immediate = 0;
+          (data.items||[]).forEach(it=>{
+            if (Array.isArray(it.output) && it.output.length){
+              renderOutputs(it.output);
+              immediate += it.output.length;
+            }
+          });
+          statusEl.textContent = `batch: ${data.count} predikcií – už doručených: ${immediate}`;
+
           const ids = (data.items||[]).map(it=>it.id).filter(Boolean);
-          if (!ids.length){ throw new Error("Server vrátil prázdny zoznam predikcií."); }
+          if (!ids.length){
+            if (!immediate) throw new Error("Server vrátil prázdny zoznam predikcií.");
+            return;
+          }
           const finals = await Promise.all(ids.map(pollOne));
-          let total = 0;
-          finals.forEach((final, idx) => {
+          let total = immediate;
+          finals.forEach(final=>{
             const urls = extractOutputs(final);
-            urls.forEach(url=>{
-              total++;
-              const wrap = document.createElement("div");
-              wrap.className = "imgwrap";
-              const img = document.createElement("img");
-              img.src = url;
-              wrap.appendChild(img);
-              out.appendChild(wrap);
-            });
+            if (urls.length) { renderOutputs(urls); total += urls.length; }
           });
           statusEl.textContent = `batch hotový • doručených obrázkov: ${total}`;
         } else {
@@ -178,7 +230,6 @@
         }
       }catch(err){
         console.error(err);
-        // už sme dali peknú hlášku do statusEl; alert nech je stručný
         alert(`Chyba: ${err?.message ?? err}`);
       }finally{
         btn.disabled = false; btn.textContent = "Generovať";
