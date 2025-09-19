@@ -11,7 +11,7 @@
     .card{background:#11151b;border:1px solid #1a202b;border-radius:16px;padding:16px 16px 8px}
     .row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap}
     textarea{flex:1 1 100%;min-height:100px;resize:vertical;border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:12px;font-size:16px}
-    select, input[type="number"]{border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:10px 12px;font-size:15px}
+    select{border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:10px 12px;font-size:15px}
     .controls{display:flex;gap:12px;flex-wrap:wrap}
     .controls > *{min-width:200px}
     button{background:#00bcff;border:none;border-radius:12px;padding:12px 16px;color:#001018;font-weight:700;cursor:pointer}
@@ -24,6 +24,8 @@
     a{color:#00bcff}
     label{font-size:13px;color:#aab6c1;margin-bottom:6px;display:block}
     .field{display:flex;flex-direction:column}
+    .error{color:#ff6b6b}
+    code{background:#0e141b;padding:2px 6px;border-radius:6px}
   </style>
 </head>
 <body>
@@ -67,7 +69,7 @@
         <button id="btn">Generovať</button>
         <div class="status" id="status"></div>
       </div>
-      <p class="muted">Pozn.: Nie všetky buildy musia rešpektovať každý pomer strán; ak ho model ignoruje, skús iný pomer (alebo neskôr pridáme width/height). Token zostáva na serveri.</p>
+      <p class="muted">Pozn.: Niektoré buildy môžu ignorovať počet výstupov; server to rieši paralelnými predikciami. Token je iba na serveri.</p>
     </div>
 
     <div class="out" id="out"></div>
@@ -79,17 +81,33 @@
     const statusEl = $("#status");
     const out = $("#out");
 
-    async function poll(id){
+    function safeMsg(x){
+      if (x == null) return "Unknown error";
+      if (typeof x === "string") return x;
+      try { return JSON.stringify(x); } catch { return String(x); }
+    }
+
+    async function pollOne(id){
       while(true){
         const r = await fetch(`/api/predictions/${id}`);
-        const data = await r.json();
-        if (!r.ok){ throw new Error(data?.error || "Request failed"); }
-        statusEl.textContent = `status: ${data.status}`;
+        const data = await r.json().catch(()=> ({}));
+        if (!r.ok){
+          throw new Error(`Polling failed (${r.status}): ${safeMsg(data?.error || data)}`);
+        }
         if (["succeeded","failed","canceled"].includes(data.status)){
           return data;
         }
-        await sleep(1800);
+        await sleep(1300);
       }
+    }
+
+    function extractOutputs(final){
+      // Možné tvary výstupu
+      if (typeof final?.output === "string") return [final.output];
+      if (Array.isArray(final?.output)) return final.output;
+      if (Array.isArray(final?.output?.images)) return final.output.images;
+      if (Array.isArray(final?.output?.data)) return final.output.data;
+      return [];
     }
 
     $("#btn").addEventListener("click", async ()=>{
@@ -109,29 +127,59 @@
           headers: {"Content-Type":"application/json"},
           body: JSON.stringify({ prompt, numImages, aspect })
         });
-        const data = await r.json();
-        if (!r.ok){ throw new Error(data?.error || "API error"); }
 
-        statusEl.innerHTML = `prediction id: <code>${data.id}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
-        const final = await poll(data.id);
+        const data = await r.json().catch(()=> ({}));
+        if (!r.ok){
+          // robustná hláška (žiadne [object Object])
+          const msg = safeMsg(data?.error || data);
+          statusEl.innerHTML = `<span class="error">Request failed (${r.status}): ${msg}</span>`;
+          throw new Error(msg);
+        }
 
-        // Output may be an array (images) or object with images array
-        const outputs = Array.isArray(final.output) ? final.output : (final.output?.images || []);
-        if (outputs?.length){
-          outputs.forEach(url=>{
-            const wrap = document.createElement("div");
-            wrap.className = "imgwrap";
-            const img = document.createElement("img");
-            img.src = url;
-            wrap.appendChild(img);
-            out.appendChild(wrap);
+        if (data.mode === "single") {
+          statusEl.innerHTML = `prediction id: <code>${data.id ?? "?"}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
+          if (!data.id){ throw new Error("Server nevrátil prediction id."); }
+          const final = await pollOne(data.id);
+          const outputs = extractOutputs(final);
+          if (outputs.length){
+            outputs.forEach(url=>{
+              const wrap = document.createElement("div");
+              wrap.className = "imgwrap";
+              const img = document.createElement("img");
+              img.src = url;
+              wrap.appendChild(img);
+              out.appendChild(wrap);
+            });
+          } else {
+            out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
+          }
+        } else if (data.mode === "batch") {
+          statusEl.textContent = `batch: ${data.count} predikcií – čakám na výsledky...`;
+          const ids = (data.items||[]).map(it=>it.id).filter(Boolean);
+          if (!ids.length){ throw new Error("Server vrátil prázdny zoznam predikcií."); }
+          const finals = await Promise.all(ids.map(pollOne));
+          let total = 0;
+          finals.forEach((final, idx) => {
+            const urls = extractOutputs(final);
+            urls.forEach(url=>{
+              total++;
+              const wrap = document.createElement("div");
+              wrap.className = "imgwrap";
+              const img = document.createElement("img");
+              img.src = url;
+              wrap.appendChild(img);
+              out.appendChild(wrap);
+            });
           });
-        }else{
-          out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
+          statusEl.textContent = `batch hotový • doručených obrázkov: ${total}`;
+        } else {
+          statusEl.innerHTML = `<span class="error">Neznámy mód odpovede.</span>`;
+          throw new Error("Unknown response mode");
         }
       }catch(err){
         console.error(err);
-        alert(err.message);
+        // už sme dali peknú hlášku do statusEl; alert nech je stručný
+        alert(`Chyba: ${err?.message ?? err}`);
       }finally{
         btn.disabled = false; btn.textContent = "Generovať";
       }
