@@ -27,13 +27,14 @@
     .thumb{max-width:160px;border-radius:10px;border:1px solid #1c232e}
     .error{color:#ff6b6b}
     code{background:#0e141b;padding:2px 6px;border-radius:6px}
+    .inline{display:inline-block;margin-left:6px}
   </style>
 </head>
 <body>
   <header><strong>Seedream 4</strong> • Replicate test</header>
   <main>
     <div class="card">
-      <p>Zadaj prompt, prípadne pridaj referenčný obrázok (image-to-image), počet obrázkov (max 4) a formát.</p>
+      <p>Zadaj prompt, voliteľne pridaj referenčný obrázok (image-to-image), nastav počet obrázkov a formát (pomery strán).</p>
 
       <div class="row">
         <textarea id="prompt" placeholder="Napr.: Cinematic portrait of a vintage car by Bratislava castle, golden hour"></textarea>
@@ -66,10 +67,11 @@
           </select>
         </div>
 
-        <div class="field">
+        <div class="field" style="min-width:260px">
           <label for="image">Referenčný obrázok (voliteľné)</label>
           <input type="file" id="image" accept="image/*">
-          <div id="preview"></div>
+          <div id="preview" class="inline"></div>
+          <div id="uploadLink" class="inline"></div>
         </div>
       </div>
 
@@ -77,7 +79,9 @@
         <button id="btn">Generovať</button>
         <div class="status" id="status"></div>
       </div>
-      <p class="muted">Pozn.: Obrázok sa uloží do <code>/uploads</code> na serveri a použije sa ako URL pre image-to-image. Token zostáva na serveri.</p>
+      <p class="muted">
+        Upload sa uloží na <code>/uploads</code> a použije sa ako URL pre image-to-image. Token ostáva na serveri.
+      </p>
     </div>
 
     <div class="out" id="out"></div>
@@ -90,6 +94,7 @@
     const out = $("#out");
     const fileInput = $("#image");
     const preview = $("#preview");
+    const uploadLink = $("#uploadLink");
     let selectedDataUrl = null;
 
     function safeMsg(x){
@@ -98,10 +103,10 @@
       try { return JSON.stringify(x); } catch { return String(x); }
     }
 
-    // náhľad a načítanie do dataURL
     fileInput.addEventListener("change", ()=>{
       selectedDataUrl = null;
       preview.innerHTML = "";
+      uploadLink.innerHTML = "";
       const file = fileInput.files?.[0];
       if (!file) return;
       const reader = new FileReader();
@@ -123,7 +128,13 @@
         body: JSON.stringify({ dataUrl: selectedDataUrl })
       });
       const data = await r.json().catch(()=> ({}));
-      if (!r.ok) throw new Error(`Upload failed (${r.status}): ${safeMsg(data?.error || data)}`);
+      if (!r.ok){
+        const msg = safeMsg(data?.error || data);
+        statusEl.innerHTML = `<span class="error">Upload failed (${r.status}): ${msg}</span>`;
+        throw new Error(msg);
+      }
+      // zobraz priamy link na verejnú URL
+      uploadLink.innerHTML = `— <a href="${data.url}" target="_blank">Open image URL</a>`;
       return data.url;
     }
 
@@ -149,9 +160,21 @@
       return [];
     }
 
+    function renderOutputs(urls){
+      urls.forEach(url=>{
+        const wrap = document.createElement("div");
+        wrap.className = "imgwrap";
+        const img = document.createElement("img");
+        img.src = url;
+        wrap.appendChild(img);
+        out.appendChild(wrap);
+      });
+    }
+
     $("#btn").addEventListener("click", async ()=>{
       statusEl.textContent = "";
       out.innerHTML = "";
+      uploadLink.innerHTML = uploadLink.innerHTML; // ponechaj link na upload, ak je
       const prompt = $("#prompt").value.trim();
       if (!prompt){ alert("Zadaj prompt"); return; }
       const numImages = $("#num").value;
@@ -161,7 +184,7 @@
       btn.disabled = true; btn.textContent = "Nahrávam obrázok...";
 
       try{
-        const imageUrl = await uploadIfAny(); // null ak nevybraný
+        const imageUrl = await uploadIfAny(); // null ak nie je vybraný
 
         btn.textContent = "Generujem...";
         const r = await fetch("/api/generate", {
@@ -177,16 +200,11 @@
           throw new Error(msg);
         }
 
-        // ak sme output dostali už priamo (Prefer: wait)
-        function renderOutputs(urls){
-          urls.forEach(url=>{
-            const wrap = document.createElement("div");
-            wrap.className = "imgwrap";
-            const img = document.createElement("img");
-            img.src = url;
-            wrap.appendChild(img);
-            out.appendChild(wrap);
-          });
+        // doplň informáciu o tom, akú URL server použil
+        if (data?.debug?.usedImageUrl) {
+          const u = data.debug.usedImageUrl;
+          const extra = ` | using: <a href="${u}" target="_blank">${u}</a>`;
+          statusEl.innerHTML = (statusEl.innerHTML || "OK") + extra;
         }
 
         if (data.mode === "single") {
@@ -195,14 +213,13 @@
             renderOutputs(data.output);
             return;
           }
-          statusEl.innerHTML = `prediction id: <code>${data.id ?? "?"}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
+          statusEl.innerHTML = `prediction id: <code>${data.id ?? "?"}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}` + (data?.debug?.usedImageUrl ? ` | using: <a href="${data.debug.usedImageUrl}" target="_blank">${data.debug.usedImageUrl}</a>` : "");
           if (!data.id){ throw new Error("Server nevrátil prediction id."); }
           const final = await pollOne(data.id);
           const outputs = extractOutputs(final);
           if (outputs.length) renderOutputs(outputs);
           else out.innerHTML = "<div class='muted'>Žiadny výstup (skontroluj log v odkaze na Replicate).</div>";
         } else if (data.mode === "batch") {
-          // ak máme hneď outputy
           let immediate = 0;
           (data.items||[]).forEach(it=>{
             if (Array.isArray(it.output) && it.output.length){
@@ -211,6 +228,9 @@
             }
           });
           statusEl.textContent = `batch: ${data.count} predikcií – už doručených: ${immediate}`;
+          if (data?.debug?.usedImageUrl) {
+            statusEl.innerHTML += ` | using: <a href="${data.debug.usedImageUrl}" target="_blank">${data.debug.usedImageUrl}</a>`;
+          }
 
           const ids = (data.items||[]).map(it=>it.id).filter(Boolean);
           if (!ids.length){
@@ -223,7 +243,7 @@
             const urls = extractOutputs(final);
             if (urls.length) { renderOutputs(urls); total += urls.length; }
           });
-          statusEl.textContent = `batch hotový • doručených obrázkov: ${total}`;
+          statusEl.textContent = `batch hotový • doručených obrázkov: ${total}` + (data?.debug?.usedImageUrl ? ` | using: ${data.debug.usedImageUrl}` : "");
         } else {
           statusEl.innerHTML = `<span class="error">Neznámy mód odpovede.</span>`;
           throw new Error("Unknown response mode");
