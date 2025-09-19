@@ -21,7 +21,6 @@ const MODEL_OWNER = "bytedance";
 const MODEL_NAME = "seedream-4";
 const MODEL_BASE = `https://api.replicate.com/v1/models/${MODEL_OWNER}/${MODEL_NAME}`;
 
-/** Helper: call Replicate with Bearer token */
 async function rfetch(url, options = {}) {
   const headers = {
     "Authorization": `Bearer ${REPLICATE_TOKEN}`,
@@ -30,41 +29,30 @@ async function rfetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
-/** Create prediction with official-model endpoint, fallback to versioned predictions */
-async function createPrediction({ prompt, numImages, aspect }) {
-  // sanitize inputs
-  const n = Math.max(1, Math.min(4, Number(numImages) || 1));
-
-  // Kompatibilné názvy parametrov – model si vyberie ten svoj, ostatné ignoruje
+/** Vytvorí 1 predikciu (jediný obrázok) – official endpoint s fallbackom na version */
+async function createSinglePrediction({ prompt, aspect }) {
+  // vstup – posielame aj alias pre aspect pre prípad rôznych buildov
   const input = {
     prompt,
-    // počet výstupov (viac aliasov pre istotu)
-    num_outputs: n,
-    num_samples: n,
-    samples: n,
-    n,
-    // aspect ratio (viac aliasov)
-    ...(aspect ? { aspect_ratio: aspect, aspect: aspect } : {})
+    ...(aspect ? { aspect_ratio: aspect, aspect } : {})
   };
 
-  // 1) Official-model endpoint (bez version)
+  // 1) official-model endpoint (bez version)
   {
     const resp = await rfetch(`${MODEL_BASE}/predictions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input })
     });
-
     if (resp.ok) return resp.json();
 
-    // Ak oficiálny endpoint nie je dostupný, fallback na version
     if (![404, 405, 400].includes(resp.status)) {
       const tx = await resp.text();
       throw new Error(`Official predictions failed: ${resp.status} ${tx}`);
     }
   }
 
-  // 2) Fallback: získať latest_version.id a zavolať /v1/predictions
+  // 2) fallback: /v1/predictions s latest_version.id
   const infoResp = await rfetch(`${MODEL_BASE}`);
   if (!infoResp.ok) {
     const tx = await infoResp.text();
@@ -72,16 +60,13 @@ async function createPrediction({ prompt, numImages, aspect }) {
   }
   const info = await infoResp.json();
   const versionId = info?.latest_version?.id;
-  if (!versionId) {
-    throw new Error("Model response missing latest_version.id (fallback failed).");
-  }
+  if (!versionId) throw new Error("Model response missing latest_version.id (fallback failed).");
 
   const resp2 = await rfetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ version: versionId, input })
   });
-
   const data2 = await resp2.json();
   if (!resp2.ok) {
     throw new Error(`Fallback predictions failed: ${resp2.status} ${JSON.stringify(data2)}`);
@@ -92,19 +77,44 @@ async function createPrediction({ prompt, numImages, aspect }) {
 /** Healthcheck */
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-/** Start prediction */
+/** Spustí generovanie: ak numImages>1 → vytvorí viac samostatných predikcií paralelne */
 app.post("/api/generate", async (req, res) => {
   try {
     const { prompt, numImages, aspect } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "Missing 'prompt'." });
     }
-    const data = await createPrediction({ prompt, numImages, aspect });
+
+    const n = Math.max(1, Math.min(4, Number(numImages) || 1));
+
+    if (n === 1) {
+      const data = await createSinglePrediction({ prompt, aspect });
+      return res.json({
+        // single prediction response (spätná kompatibilita)
+        mode: "single",
+        id: data.id,
+        getUrl: data?.urls?.get,
+        webUrl: data?.urls?.web,
+        status: data.status
+      });
+    }
+
+    // N > 1 → vytvor paralelne N predikcií (každá 1 obrázok)
+    const jobs = Array.from({ length: n }, () =>
+      createSinglePrediction({ prompt, aspect })
+    );
+    const results = await Promise.all(jobs);
+
+    // vrátime batch so zoznamom prediction ID + webUrl pre každý
     return res.json({
-      id: data.id,
-      getUrl: data?.urls?.get,
-      webUrl: data?.urls?.web,
-      status: data.status
+      mode: "batch",
+      count: results.length,
+      items: results.map(r => ({
+        id: r.id,
+        getUrl: r?.urls?.get,
+        webUrl: r?.urls?.web,
+        status: r.status
+      }))
     });
   } catch (err) {
     console.error("[/api/generate]", err);
@@ -112,7 +122,7 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-/** Poll prediction status (proxy) */
+/** Proxy na polling jednej predikcie */
 app.get("/api/predictions/:id", async (req, res) => {
   const id = req.params.id;
   try {
