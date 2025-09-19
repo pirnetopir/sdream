@@ -31,30 +31,38 @@ async function rfetch(url, options = {}) {
 }
 
 /** Try official-model endpoint first. If not supported, fall back to versioned predictions */
-async function createPrediction({ prompt }) {
+async function createPrediction({ prompt, numImages, aspect }) {
+  // sanitize inputs
+  const n = Math.max(1, Math.min(4, Number(numImages) || 1));
+  const input = { prompt, num_outputs: n };
+  if (aspect && typeof aspect === "string") {
+    input.aspect_ratio = aspect; // model-dependent; Seedream 4 podporuje pomery strán
+  }
+
   // 1) Attempt official-model predictions (no version needed)
   {
     const resp = await rfetch(`${MODEL_BASE}/predictions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: { prompt } })
+      body: JSON.stringify({ input })
     });
 
-    // If OK → return immediately
     if (resp.ok) return resp.json();
 
-    // If NOT FOUND or method not allowed → fall back
-    if (resp.status === 404 || resp.status === 405 || resp.status === 400) {
-      // Try fallback only for these
-    } else {
-      // Other errors → throw with response text
+    // Fall back on common non-support codes; otherwise bubble up error
+    if (![404, 405, 400].includes(resp.status)) {
       const tx = await resp.text();
       throw new Error(`Official predictions failed: ${resp.status} ${tx}`);
     }
   }
 
   // 2) Fallback: fetch latest_version.id
-  const info = await (await rfetch(`${MODEL_BASE}`)).json();
+  const infoResp = await rfetch(`${MODEL_BASE}`);
+  if (!infoResp.ok) {
+    const tx = await infoResp.text();
+    throw new Error(`Failed to fetch model info: ${infoResp.status} ${tx}`);
+  }
+  const info = await infoResp.json();
   const versionId = info?.latest_version?.id;
   if (!versionId) {
     throw new Error("Model response missing latest_version.id (fallback failed).");
@@ -63,10 +71,7 @@ async function createPrediction({ prompt }) {
   const resp2 = await rfetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      version: versionId,
-      input: { prompt }
-    })
+    body: JSON.stringify({ version: versionId, input })
   });
 
   const data2 = await resp2.json();
@@ -82,11 +87,11 @@ app.get("/health", (_, res) => res.json({ ok: true }));
 /** Start prediction */
 app.post("/api/generate", async (req, res) => {
   try {
-    const { prompt } = req.body || {};
+    const { prompt, numImages, aspect } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "Missing 'prompt'." });
     }
-    const data = await createPrediction({ prompt });
+    const data = await createPrediction({ prompt, numImages, aspect });
     return res.json({
       id: data.id,
       getUrl: data?.urls?.get,
