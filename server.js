@@ -30,16 +30,24 @@ async function rfetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
-/** Try official-model endpoint first. If not supported, fall back to versioned predictions */
+/** Create prediction with official-model endpoint, fallback to versioned predictions */
 async function createPrediction({ prompt, numImages, aspect }) {
   // sanitize inputs
   const n = Math.max(1, Math.min(4, Number(numImages) || 1));
-  const input = { prompt, num_outputs: n };
-  if (aspect && typeof aspect === "string") {
-    input.aspect_ratio = aspect; // model-dependent; Seedream 4 podporuje pomery strán
-  }
 
-  // 1) Attempt official-model predictions (no version needed)
+  // Kompatibilné názvy parametrov – model si vyberie ten svoj, ostatné ignoruje
+  const input = {
+    prompt,
+    // počet výstupov (viac aliasov pre istotu)
+    num_outputs: n,
+    num_samples: n,
+    samples: n,
+    n,
+    // aspect ratio (viac aliasov)
+    ...(aspect ? { aspect_ratio: aspect, aspect: aspect } : {})
+  };
+
+  // 1) Official-model endpoint (bez version)
   {
     const resp = await rfetch(`${MODEL_BASE}/predictions`, {
       method: "POST",
@@ -49,14 +57,14 @@ async function createPrediction({ prompt, numImages, aspect }) {
 
     if (resp.ok) return resp.json();
 
-    // Fall back on common non-support codes; otherwise bubble up error
+    // Ak oficiálny endpoint nie je dostupný, fallback na version
     if (![404, 405, 400].includes(resp.status)) {
       const tx = await resp.text();
       throw new Error(`Official predictions failed: ${resp.status} ${tx}`);
     }
   }
 
-  // 2) Fallback: fetch latest_version.id
+  // 2) Fallback: získať latest_version.id a zavolať /v1/predictions
   const infoResp = await rfetch(`${MODEL_BASE}`);
   if (!infoResp.ok) {
     const tx = await infoResp.text();
