@@ -9,8 +9,11 @@
     header{padding:18px 20px;background:#12151a;position:sticky;top:0;border-bottom:1px solid #1c212b}
     main{max-width:900px;margin:24px auto;padding:0 16px}
     .card{background:#11151b;border:1px solid #1a202b;border-radius:16px;padding:16px 16px 8px}
-    .row{display:flex;gap:12px;align-items:stretch}
-    textarea{width:100%;min-height:100px;resize:vertical;border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:12px;font-size:16px}
+    .row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap}
+    textarea{flex:1 1 100%;min-height:100px;resize:vertical;border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:12px;font-size:16px}
+    select, input[type="number"]{border-radius:12px;border:1px solid #2a3343;background:#0e1218;color:#fff;padding:10px 12px;font-size:15px}
+    .controls{display:flex;gap:12px;flex-wrap:wrap}
+    .controls > *{min-width:200px}
     button{background:#00bcff;border:none;border-radius:12px;padding:12px 16px;color:#001018;font-weight:700;cursor:pointer}
     button[disabled]{opacity:.55;cursor:not-allowed}
     .muted{color:#94a3b8;font-size:13px}
@@ -19,21 +22,52 @@
     img{max-width:100%;height:auto;border-radius:10px;display:block}
     .status{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#aab6c1}
     a{color:#00bcff}
+    label{font-size:13px;color:#aab6c1;margin-bottom:6px;display:block}
+    .field{display:flex;flex-direction:column}
   </style>
 </head>
 <body>
   <header><strong>Seedream 4</strong> • Replicate test</header>
   <main>
     <div class="card">
-      <p>Zadaj prompt a overíme generovanie obrázka (Replicate + Seedream 4).</p>
+      <p>Zadaj prompt, počet obrázkov (max 4) a formát (pomery strán).</p>
       <div class="row">
         <textarea id="prompt" placeholder="Napr.: Cinematic portrait of a vintage car by Bratislava castle, golden hour"></textarea>
       </div>
+
+      <div class="controls" style="margin-top:8px">
+        <div class="field">
+          <label for="num">Počet obrázkov</label>
+          <select id="num">
+            <option value="1" selected>1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="aspect">Formát (Aspect ratio)</label>
+          <select id="aspect">
+            <option value="">Auto (model)</option>
+            <option value="1:1">1:1 (štvorec)</option>
+            <option value="3:4">3:4 (portrét)</option>
+            <option value="4:3">4:3 (na šírku)</option>
+            <option value="4:5">4:5 (portrét)</option>
+            <option value="5:4">5:4 (na šírku)</option>
+            <option value="2:3">2:3 (portrét)</option>
+            <option value="3:2">3:2 (na šírku)</option>
+            <option value="9:16">9:16 (vertikál)</option>
+            <option value="16:9">16:9 (wide)</option>
+          </select>
+        </div>
+      </div>
+
       <div class="row" style="margin-top:10px">
         <button id="btn">Generovať</button>
         <div class="status" id="status"></div>
       </div>
-      <p class="muted">Token zostáva na serveri. Frontend volá len vlastný backend.</p>
+      <p class="muted">Pozn.: Nie všetky buildy musia rešpektovať každý pomer strán; ak ho model ignoruje, skús iný pomer (alebo neskôr pridáme width/height). Token zostáva na serveri.</p>
     </div>
 
     <div class="out" id="out"></div>
@@ -63,6 +97,8 @@
       out.innerHTML = "";
       const prompt = $("#prompt").value.trim();
       if (!prompt){ alert("Zadaj prompt"); return; }
+      const numImages = $("#num").value;
+      const aspect = $("#aspect").value || undefined;
 
       const btn = $("#btn");
       btn.disabled = true; btn.textContent = "Beží...";
@@ -71,15 +107,15 @@
         const r = await fetch("/api/generate", {
           method: "POST",
           headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({ prompt })
+          body: JSON.stringify({ prompt, numImages, aspect })
         });
         const data = await r.json();
         if (!r.ok){ throw new Error(data?.error || "API error"); }
 
-        statusEl.innerHTML = `prediction id: <code>${data.id}</code> — ${data.webUrl ? `<a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
+        statusEl.innerHTML = `prediction id: <code>${data.id}</code> ${data.webUrl ? `— <a href="${data.webUrl}" target="_blank">open on Replicate</a>` : ""}`;
         const final = await poll(data.id);
 
-        // Replicate output is usually an array of image URLs.
+        // Output may be an array (images) or object with images array
         const outputs = Array.isArray(final.output) ? final.output : (final.output?.images || []);
         if (outputs?.length){
           outputs.forEach(url=>{
