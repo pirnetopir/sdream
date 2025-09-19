@@ -36,7 +36,6 @@ if (!REPLICATE_TOKEN) {
 // --- helpers ---
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function ensureHttpsProto(req){
-  // Render má HTTPS; niektoré hlavičky môžu prísť ako http – vynútime https
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `https://${host}`;
 }
@@ -44,6 +43,7 @@ function abortableFetch(url, options = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const headers = {
+    "Authorization": `Token ${REPLICATE_API_TOKEN || REPLICATE_TOKEN || process.env.REPLICATE_API_TOKEN || REPLICATE_TOKEN}`, // keep Token header
     "Authorization": `Token ${REPLICATE_TOKEN}`,
     ...(options.headers || {})
   };
@@ -139,7 +139,7 @@ app.post("/api/upload", async (req, res) => {
     const base = ensureHttpsProto(req);
     const url = `${base}/uploads/${name}`;
 
-    // rýchle overenie prístupnosti (HEAD a prípadne GET)
+    // rýchle overenie prístupnosti
     let ok = false, status = 0;
     try {
       const h = await fetch(url, { method: "HEAD" });
@@ -159,12 +159,22 @@ app.post("/api/upload", async (req, res) => {
   }
 });
 
-// --- core: one prediction (image optional) ---
+/** --- core: one prediction (image optional) ---
+ * IMPORTANT: for Seedream 4 on Replicate the reference image key is `image_input` (ARRAY)
+ * See the model version API schema. :contentReference[oaicite:1]{index=1}
+ */
 async function createSinglePrediction({ prompt, aspect, imageUrl }) {
+  // Ak posielame obrázok a nezadaný aspekt, nech sa zladí s ním
+  const effectiveAspect = aspect || (imageUrl ? "match_input_image" : undefined);
+
   const input = {
     prompt,
-    ...(aspect ? { aspect_ratio: aspect, aspect } : {}),
-    ...(imageUrl ? { image: imageUrl, image_url: imageUrl, input_image: imageUrl, reference_image: imageUrl } : {})
+    ...(effectiveAspect ? { aspect_ratio: effectiveAspect } : {}),
+    // kľúčový fix: image_input musí byť pole URL
+    ...(imageUrl ? { image_input: [imageUrl] } : {}),
+    // voliteľne môžeš pridať aj rozlíšenie:
+    // size: "2K", // 1K | 2K | 4K | "custom"
+    // width/height iba keď size === "custom"
   };
 
   // 1) official (Prefer: wait)
@@ -182,7 +192,7 @@ async function createSinglePrediction({ prompt, aspect, imageUrl }) {
     try { return body.json ?? JSON.parse(body.raw || "{}"); } catch {}
   }
 
-  // 2) fallback
+  // 2) fallback: version flow
   const infoResp = await fetchRetry(`${MODEL_BASE}`, {}, "model-info");
   const infoBody = await readResp(infoResp);
   const infoJson = infoBody.json || JSON.parse(infoBody.raw || "{}");
@@ -237,7 +247,10 @@ app.post("/api/generate", async (req, res) => {
         webUrl: data?.urls?.web ?? null,
         status: data?.status ?? null,
         output: outputs || null,
-        debug: { usedImageUrl }
+        debug: { usedImageUrl, sentKeys: Object.keys({
+          ...(usedImageUrl ? { image_input: [usedImageUrl] } : {}),
+          ...(aspect ? { aspect_ratio: aspect } : {})
+        }) }
       });
     }
 
@@ -263,7 +276,7 @@ app.post("/api/generate", async (req, res) => {
       count: items.length,
       items,
       tookMs: Date.now() - startedAt,
-      debug: { usedImageUrl }
+      debug: { usedImageUrl, note: "image_input[] used; aspect_ratio defaulted to match_input_image for i2i when not provided." }
     });
   } catch (err) {
     console.error("[/api/generate] ERROR:", err?.message || err);
