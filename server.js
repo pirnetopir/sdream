@@ -43,8 +43,7 @@ function abortableFetch(url, options = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const headers = {
-    "Authorization": `Token ${REPLICATE_API_TOKEN || REPLICATE_TOKEN || process.env.REPLICATE_API_TOKEN || REPLICATE_TOKEN}`, // keep Token header
-    "Authorization": `Token ${REPLICATE_TOKEN}`,
+    "Authorization": `Token ${REPLICATE_TOKEN}`,  // správne, používaj iba REPLICATE_TOKEN
     ...(options.headers || {})
   };
   return fetch(url, { ...options, headers, signal: controller.signal })
