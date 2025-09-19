@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: seedream4-replicate-starter
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: REPLICATE_API_TOKEN
+        sync: false   # set this in Render dashboard
